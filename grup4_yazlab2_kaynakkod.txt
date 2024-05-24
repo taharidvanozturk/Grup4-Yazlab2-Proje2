@@ -1,0 +1,347 @@
+package com.example.voicenavigationapp.manager
+
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.os.Bundle
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.widget.Toast
+import java.util.Locale
+
+class VoiceRecognitionManager(
+    private val context: Context,
+    private val callback: (String) -> Unit
+) {
+    private val speechRecognizer: SpeechRecognizer = SpeechRecognizer.createSpeechRecognizer(context)
+    private val recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+    }
+
+    fun startListening() {
+        try {
+            speechRecognizer.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle) {}
+                override fun onBeginningOfSpeech() {}
+                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onBufferReceived(buffer: ByteArray) {}
+                override fun onEndOfSpeech() {}
+                override fun onError(error: Int) {}
+                override fun onResults(results: Bundle) {
+                    val matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    matches?.let {
+                        if (it.isNotEmpty()) {
+                            callback(it[0])
+                        }
+                    }
+                }
+                override fun onPartialResults(partialResults: Bundle) {}
+                override fun onEvent(eventType: Int, params: Bundle) {}
+            })
+            speechRecognizer.startListening(recognizerIntent)
+        } catch (e: ActivityNotFoundException) {
+            Toast.makeText(context, "Device doesn't support speech recognition", Toast.LENGTH_SHORT).show()
+        }
+    }
+}
+
+package com.example.voicenavigationapp.models
+
+data class DirectionsResponse(
+    val routes: List<Route>
+)
+
+data class Route(
+    val legs: List<Leg>
+)
+
+data class Leg(
+    val steps: List<Step>
+)
+
+data class Step(
+    val html_instructions: String,
+    val distance: Distance
+)
+
+data class Distance(
+    val text: String
+)
+package com.example.voicenavigationapp.models
+
+data class GeocodingResponse(
+    val results: List<Result>
+)
+
+data class Result(
+    val geometry: Geometry
+)
+
+data class Geometry(
+    val location: Location
+)
+
+data class Location(
+    val lat: Double,
+    val lng: Double
+)
+package com.example.voicenavigationapp.utils
+
+import com.example.voicenavigationapp.api.GeocodingApi
+import com.example.voicenavigationapp.models.GeocodingResponse
+import retrofit2.Call
+import retrofit2.Callback
+import retrofit2.Response
+
+object GeocodingHelper {
+    fun getLatLngFromAddress(address: String, callback: (Double, Double) -> Unit) {
+        val geocodingApi = RetrofitInstance.api
+
+        geocodingApi.getGeocodingData(address, "AIzaSyB8ywbcpeQSlVVAPT9S_EDXIlA3_D5ozts").enqueue(object : Callback<GeocodingResponse> {
+            override fun onResponse(call: Call<GeocodingResponse>, response: Response<GeocodingResponse>) {
+                if (response.isSuccessful) {
+                    response.body()?.let {
+                        val location = it.results[0].geometry.location
+                        callback(location.lat, location.lng)
+                    }
+                }
+            }
+
+            override fun onFailure(call: Call<GeocodingResponse>, t: Throwable) {
+                // Handle failure
+            }
+        })
+    }
+}
+package com.example.voicenavigationapp.utils
+
+import com.example.voicenavigationapp.models.DirectionsResponse
+import com.example.voicenavigationapp.api.DirectionsApi
+import com.example.voicenavigationapp.utils.RetrofitInstance
+import retrofit2.Call
+import retrofit2.Callback
+import retrofit2.Response
+
+object NavigationHelper {
+    fun provideNavigationInstructions(startLat: Double, startLng: Double, endLat: Double, endLng: Double, callback: (String) -> Unit) {
+        val directionsApi = RetrofitInstance.directionsApi
+        val origin = "$startLat,$startLng"
+        val destination = "$endLat,$endLng"
+
+        directionsApi.getDirections(origin, destination, "walking", "AIzaSyB8ywbcpeQSlVVAPT9S_EDXIlA3_D5ozts").enqueue(object : Callback<DirectionsResponse> {
+            override fun onResponse(call: Call<DirectionsResponse>, response: Response<DirectionsResponse>) {
+                if (response.isSuccessful) {
+                    response.body()?.let { directionsResponse ->
+                        val steps = directionsResponse.routes[0].legs[0].steps
+                        val instructions = steps.joinToString(separator = "\n") { step ->
+                            step.html_instructions.replace(Regex("<.*?>"), "") + " (" + step.distance.text + ")"
+                        }
+                        callback(instructions)
+                    }
+                }
+            }
+
+            override fun onFailure(call: Call<DirectionsResponse>, t: Throwable) {
+                callback("Navigasyon talimatları alınırken bir hata oluştu: ${t.message}")
+            }
+        })
+    }
+}
+package com.example.voicenavigationapp.utils
+
+import com.example.voicenavigationapp.api.GeocodingApi
+import okhttp3.OkHttpClient
+import okhttp3.logging.HttpLoggingInterceptor
+import retrofit2.Retrofit
+import retrofit2.converter.gson.GsonConverterFactory
+
+object RetrofitInstance {
+    private val retrofit by lazy {
+        val logging = HttpLoggingInterceptor()
+        logging.setLevel(HttpLoggingInterceptor.Level.BODY)
+        val client = OkHttpClient.Builder()
+            .addInterceptor(logging)
+            .build()
+
+        Retrofit.Builder()
+            .baseUrl("https://maps.googleapis.com/maps/api/")
+            .addConverterFactory(GsonConverterFactory.create())
+            .client(client)
+            .build()
+    }
+
+    val api: GeocodingApi by lazy {
+        retrofit.create(GeocodingApi::class.java)
+    }
+}
+package com.example.voicenavigationapp
+
+import android.content.Intent
+import android.os.Bundle
+import androidx.appcompat.app.AppCompatActivity
+import com.example.voicenavigationapp.databinding.ActivityMainBinding
+import com.example.voicenavigationapp.manager.VoiceRecognitionManager
+import com.example.voicenavigationapp.utils.GeocodingHelper
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var binding: ActivityMainBinding
+    private lateinit var voiceRecognitionManager: VoiceRecognitionManager
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+
+        voiceRecognitionManager = VoiceRecognitionManager(this) { address ->
+            GeocodingHelper.getLatLngFromAddress(address) { lat, lng ->
+                startNavigation(lat, lng)
+            }
+        }
+
+        binding.startNavigationButton.setOnClickListener {
+            voiceRecognitionManager.startListening()
+        }
+    }
+
+    private fun startNavigation(lat: Double, lng: Double) {
+        val intent = Intent(this, NavigationActivity::class.java).apply {
+            putExtra("DEST_LAT", lat)
+            putExtra("DEST_LNG", lng)
+        }
+        startActivity(intent)
+    }
+}
+package com.example.voicenavigationapp
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Bundle
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import com.example.voicenavigationapp.databinding.ActivityNavigationBinding
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.maps.CameraUpdateFactory
+import com.google.android.gms.maps.GoogleMap
+import com.google.android.gms.maps.OnMapReadyCallback
+import com.google.android.gms.maps.SupportMapFragment
+import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.MarkerOptions
+
+class NavigationActivity : AppCompatActivity(), OnMapReadyCallback {
+
+    private lateinit var binding: ActivityNavigationBinding
+    private lateinit var map: GoogleMap
+    private lateinit var fusedLocationProviderClient: FusedLocationProviderClient
+    private lateinit var currentLocation: LatLng
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        binding = ActivityNavigationBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+
+        fusedLocationProviderClient = LocationServices.getFusedLocationProviderClient(this)
+        getLocationPermission()
+
+        val mapFragment = supportFragmentManager.findFragmentById(R.id.map) as SupportMapFragment
+        mapFragment.getMapAsync(this)
+    }
+
+    private fun getLocationPermission() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+            == PackageManager.PERMISSION_GRANTED) {
+            getDeviceLocation()
+        } else {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION),
+                LOCATION_PERMISSION_REQUEST_CODE
+            )
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<String>, grantResults: IntArray
+    ) {
+        if (requestCode == LOCATION_PERMISSION_REQUEST_CODE) {
+            if ((grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED)) {
+                getDeviceLocation()
+            }
+        }
+    }
+
+    private fun getDeviceLocation() {
+        try {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED) {
+                val locationResult = fusedLocationProviderClient.lastLocation
+                locationResult.addOnCompleteListener(this) { task ->
+                    if (task.isSuccessful) {
+                        val location = task.result
+                        if (location != null) {
+                            currentLocation = LatLng(location.latitude, location.longitude)
+                            map.moveCamera(CameraUpdateFactory.newLatLngZoom(currentLocation, DEFAULT_ZOOM.toFloat()))
+                        }
+                    }
+                }
+            }
+        } catch (e: SecurityException) {
+            e.printStackTrace()
+        }
+    }
+
+    override fun onMapReady(googleMap: GoogleMap) {
+        map = googleMap
+        updateLocationUI()
+    }
+
+    private fun updateLocationUI() {
+        try {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED) {
+                map.isMyLocationEnabled = true
+                map.uiSettings.isMyLocationButtonEnabled = true
+            } else {
+                map.isMyLocationEnabled = false
+                map.uiSettings.isMyLocationButtonEnabled = false
+                getLocationPermission()
+            }
+        } catch (e: SecurityException) {
+            e.printStackTrace()
+        }
+    }
+
+    companion object {
+        private const val LOCATION_PERMISSION_REQUEST_CODE = 1
+        private const val DEFAULT_ZOOM = 15
+    }
+}
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.voicenavigationapp">
+
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme">
+        <activity android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <activity android:name=".NavigationActivity"/>
+    </application>
+
+</manifest>
